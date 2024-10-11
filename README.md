@@ -21,3 +21,7 @@ Saves files by semver tag in the following directory structure:
 ```shell
 docker build -t hub.opensciencegrid.org/opensciencegrid/release-webhook .
 ```
+
+```shell
+docker run -it -p 8080:8000 --env-file example.env hub.opensciencegrid.org/opensciencegrid/release-webhook
+```

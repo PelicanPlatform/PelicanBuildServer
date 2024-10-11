@@ -1,9 +1,7 @@
 import json
 import os
-import ssl
 import packaging.version
 import logging
-import requests
 import aiohttp
 import aiofiles as aiof
 import asyncio
@@ -11,6 +9,7 @@ import asyncio
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
 
 def create_file_directories(file_path: str) -> None:
     """
@@ -71,14 +70,21 @@ async def install_new_releases(repo: str, directory: str) -> None:
     :return:
     """
     async with aiohttp.ClientSession() as session:
-        async with session.get(f"https://api.github.com/repos/{repo}/releases", ssl_context=ssl_context) as response:
+        async with session.get(f"https://api.github.com/repos/{repo}/releases") as response:
             releases = await response.json()
 
             tasks = []
             for release in releases:
 
                 tag = release['tag_name'].replace("v", "")
-                if tag not in os.listdir(directory):
+
+                existing_tag_directories = []
+                try:
+                    existing_tag_directories = os.listdir(directory)
+                except FileNotFoundError:
+                    pass
+
+                if tag not in existing_tag_directories:
 
                     asset_directory = f"{directory}/{tag}"
                     tasks.append(install_assets(session, release['assets_url'], asset_directory))
