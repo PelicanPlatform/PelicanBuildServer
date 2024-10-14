@@ -23,5 +23,15 @@ docker build -t hub.opensciencegrid.org/opensciencegrid/release-webhook .
 ```
 
 ```shell
-docker run -it -p 8080:8000 --env-file example.env hub.opensciencegrid.org/opensciencegrid/release-webhook
+docker run -it -p 8080:8000 --env-file example.env -v ${PWD}/releases:/srv/releases hub.opensciencegrid.org/opensciencegrid/release-webhook
+```
+
+```shell
+docker push hub.opensciencegrid.org/opensciencegrid/release-webhook
+```
+
+## Run the NGINX server that sits in front of the webhook
+
+```shell
+docker run -it -p 80:80 --env-file example.env -v ${PWD}/releases:/srv/releases  -v ${PWD}/nginx.conf:/etc/nginx/templates/nginx.conf.template nginx
 ```

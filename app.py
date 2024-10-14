@@ -27,18 +27,23 @@ async def lifespan(app: FastAPI):
     await update()
 
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(update, "interval", minutes=1)
+    scheduler.add_job(update, "interval", minutes=480)
     scheduler.start()
 
     yield
 
 
-app = FastAPI(lifespan=lifespan)
+app = FastAPI(lifespan=lifespan, root_path="./")
 
 
 @app.get("/")
 async def root():
     return {"message": "Hello World, check out the /docs page for more information"}
+
+
+@app.get("/health")
+async def health():
+    return {"message": "Healthy"}
 
 
 @app.post("/api/hooks/release-download-toggle")
