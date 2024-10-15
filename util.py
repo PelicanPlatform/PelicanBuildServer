@@ -1,4 +1,6 @@
-import json
+import functools
+import ssl
+import certifi
 import os
 import shutil
 import re
@@ -8,9 +10,14 @@ import aiohttp
 import aiofiles as aiof
 import asyncio
 
+from aiohttp import ClientResponseError
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Create default ssl context for dev
+ssl_context = ssl.create_default_context(cafile=certifi.where())
 
 
 def create_file_directories(file_path: str) -> None:
@@ -73,54 +80,56 @@ async def install_assets(session: aiohttp.ClientSession, url: str, directory: st
         await asyncio.gather(*tasks)
 
 
-async def install_releases(repo: str, directory: str) -> None:
+async def install_releases(session: aiohttp.ClientSession, repo: str, directory: str) -> None:
     """
     Iterate through the release api and if the assets don't exist in the directory, download them
+    :param session: aiohttp session
     :param repo: The Github repository to download
     :param directory: Directory to download the assets to
     :return:
     """
-    async with aiohttp.ClientSession() as session:
-        async with session.get(f"https://api.github.com/repos/{repo}/releases") as response:
-            releases = await response.json()
 
-            tasks = []
-            for release in releases:
-                tag = release['tag_name'].replace("v", "")
-                asset_directory = f"{directory}/{tag}"
-                tasks.append(install_assets(session, release['assets_url'], asset_directory))
+    async with session.get(f"https://api.github.com/repos/{repo}/releases") as response:
+        releases = await response.json()
 
-            if len(tasks) == 0:
-                logger.info("No new releases found.")
-                return
+        tasks = []
+        for release in releases:
+            tag = release['tag_name'].replace("v", "")
+            asset_directory = f"{directory}/{tag}"
+            tasks.append(install_assets(session, release['assets_url'], asset_directory))
 
-            await asyncio.gather(*tasks)
+        if len(tasks) == 0:
+            logger.info("No new releases found.")
+            return
+
+        await asyncio.gather(*tasks)
 
 
-async def dynamic_linking(repo: str, directory: str) -> None:
+async def dynamic_linking(session: aiohttp.ClientSession, repo: str, directory: str) -> None:
     """
     Create symbolic links for the latest, major and minor releases
+    :param session: aiohttp session
     :param repo: The Github repository to download
     :param directory: Directory to download the assets to
     :return:
     """
 
-    release_tags = await get_release_tags(repo)
+    release_tags = await get_release_tags(session, repo)
     await apply_symbolic_links(release_tags, directory)
     await update_latest_release(release_tags[0], directory)
 
 
-async def get_release_tags(repo: str) -> list[packaging.version.Version]:
-    async with aiohttp.ClientSession() as session:
-        async with session.get(f"https://api.github.com/repos/{repo}/releases") as response:
+async def get_release_tags(session: aiohttp.ClientSession, repo: str) -> list[packaging.version.Version]:
 
-            releases = await response.json()
-            release_tags = [packaging.version.parse(release['tag_name'].replace("v", "")) for release in releases]
+    async with session.get(f"https://api.github.com/repos/{repo}/releases") as response:
 
-            # Sort the release tags
-            release_tags.sort(reverse=True)
+        releases = await response.json()
+        release_tags = [packaging.version.parse(release['tag_name'].replace("v", "")) for release in releases]
 
-            return release_tags
+        # Sort the release tags
+        release_tags.sort(reverse=True)
+
+        return release_tags
 
 
 async def apply_symbolic_links(release_tags: list[packaging.version.Version], directory: str) -> None:
@@ -200,14 +209,43 @@ def strip_version(version: str) -> str:
     return r.sub("", version)
 
 
+def retry_on_exception(exception, retries: int = 3):
+    """
+    Retry the function if the exception is raised
+    :param exception: Exception to retry on
+    :param retries: Number of retries
+    :return: Decorator function
+    """
+    def decorator(func):
+        @functools.wraps(func)
+        async def wrapper(*args, **kwargs):
+            for i in range(retries):
+                try:
+                    return await func(*args, **kwargs)
+                except exception as e:
+                    logging.error(f"Caught exception: {e}")
+                    if i == retries - 1:
+                        raise e
+
+                    # Sleep for before trying again
+                    await asyncio.sleep(10**(i+1))
+
+        return wrapper
+
+    return decorator
+
+
+@retry_on_exception(ClientResponseError, retries=4)
 async def update(repo: str, directory: str) -> None:
-    await install_releases(repo, directory)
-    await dynamic_linking(repo, directory)
+
+    connector = aiohttp.TCPConnector(limit=20)
+    async with aiohttp.ClientSession(connector=connector, raise_for_status=True) as session:
+        await install_releases(session, repo, directory)
+        await dynamic_linking(session, repo, directory)
 
 
 async def main():
-    # await install_releases("PelicanPlatform/pelican", "releases")
-    await update_latest_release(packaging.version.Version("7.10.9"), "releases")
+    await update("PelicanPlatform/pelican", "releases")
 
 
 if __name__ == "__main__":

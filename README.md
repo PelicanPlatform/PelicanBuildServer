@@ -19,7 +19,7 @@ Saves files by semver tag in the following directory structure:
 ## Build and Run
 
 ```shell
-docker build -t hub.opensciencegrid.org/opensciencegrid/release-webhook .
+docker build --platform linux/amd64 -t hub.opensciencegrid.org/opensciencegrid/release-webhook .
 ```
 
 ```shell
