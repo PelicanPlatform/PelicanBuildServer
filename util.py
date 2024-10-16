@@ -1,5 +1,7 @@
 import functools
 import ssl
+import time
+from datetime import datetime
 import certifi
 import os
 import shutil
@@ -13,7 +15,7 @@ import asyncio
 from aiohttp import ClientResponseError
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 # Create default ssl context for dev
@@ -115,8 +117,7 @@ async def dynamic_linking(session: aiohttp.ClientSession, repo: str, directory: 
     """
 
     release_tags = await get_release_tags(session, repo)
-    await apply_symbolic_links(release_tags, directory)
-    await update_latest_release(release_tags[0], directory)
+    await create_tracking_directories(release_tags, directory)
 
 
 async def get_release_tags(session: aiohttp.ClientSession, repo: str) -> list[packaging.version.Version]:
@@ -132,7 +133,7 @@ async def get_release_tags(session: aiohttp.ClientSession, repo: str) -> list[pa
         return release_tags
 
 
-async def apply_symbolic_links(release_tags: list[packaging.version.Version], directory: str) -> None:
+async def create_tracking_directories(release_tags: list[packaging.version.Version], directory: str) -> None:
     """
     Iterate the present releases and apply symbolic links for the latest, major and minor releases
     :param release_tags: List of release tags in semver order
@@ -141,7 +142,9 @@ async def apply_symbolic_links(release_tags: list[packaging.version.Version], di
     """
 
     # Iterate the tags into a mapping dictionary
-    tag_mapping = {}
+    tag_mapping = {
+        'latest': release_tags[0]
+    }
     for tag in release_tags:
 
         if tag.major not in tag_mapping:
@@ -153,32 +156,25 @@ async def apply_symbolic_links(release_tags: list[packaging.version.Version], di
 
     # Create the symbolic links
     for tag_root, tag in tag_mapping.items():
-        tag_directory = f"{directory}/{tag.base_version}"
-        tag_relative_directory = f"./{tag.base_version}"
-        tag_root_directory = f"{directory}/{tag_root}"
-        if os.path.exists(tag_directory):
-            logging.info(f"Creating symbolic link: {tag_root_directory} -> {tag_relative_directory}")
-            try:
-                os.remove(tag_root_directory)
-            except FileNotFoundError:
-                pass
-            os.symlink(tag_relative_directory, tag_root_directory)
+        create_tracking_directory(tag, tag_root, directory)
 
 
-async def update_latest_release(release_tag: packaging.version.Version, directory: str) -> None:
+def create_tracking_directory(release_tag: packaging.version.Version, tracking_directory_name: str, directory: str) -> None:
     """
-    Create a latest directory. This links to the highest semver tag and recreates the checksum.txt file with the new filenames
-    :param repo:
-    :param directory:
+    Create a tracking directory. This links to an existing semver tag and updates the latest directory. Files are updated
+    to not include the version number and the checksum file is updated to reflect the new filenames.
+    :param release_tag: The release tag to link to
+    :param tracking_directory_name: The name of the tracking directory ( latest, X, X.Y )
+    :param directory: The directory the releases are stored in
     :return:
     """
 
     # Create a fresh latest directory
-    latest_directory = f"{directory}/latest"
-    if os.path.exists(latest_directory):
-        shutil.rmtree(latest_directory)
-    os.makedirs(latest_directory)
-    logging.info(f"Created latest directory: {latest_directory}")
+    tracking_directory = f"{directory}/{tracking_directory_name}"
+    if os.path.exists(tracking_directory):
+        shutil.rmtree(tracking_directory)
+    os.makedirs(tracking_directory)
+    logging.info(f"Created latest directory: {tracking_directory}")
 
     # For each file in the tag directory create a symlink in the latest directory
     tag_directory = f"{directory}/{release_tag}"
@@ -189,13 +185,13 @@ async def update_latest_release(release_tag: packaging.version.Version, director
             continue
 
         relative_tag_file = f"../{release_tag.base_version}/{file}"
-        latest_file = f"{latest_directory}/{strip_version(file)}"
+        latest_file = f"{tracking_directory}/{strip_version(file)}"
         os.symlink(relative_tag_file, latest_file)
         logging.info(f"Created symbolic link: {latest_file} -> {relative_tag_file}")
 
     # Copy and update the checksum file
     checksum_file = f"{tag_directory}/checksums.txt"
-    latest_checksum_file = f"{latest_directory}/checksums.txt"
+    latest_checksum_file = f"{tracking_directory}/checksums.txt"
     with open(checksum_file, "r") as f_existing:
         with open(latest_checksum_file, "w") as f_latest:
             for line in f_existing:
@@ -205,13 +201,18 @@ async def update_latest_release(release_tag: packaging.version.Version, director
 
 
 def strip_version(version: str) -> str:
+    # Remove the version number from the file
     r = re.compile(r"[-_]\d+\.\d+\.\d+[-_r]+\d*")
-    return r.sub("", version)
+    version = r.sub("", version)
+    # Remove unnecessary pelican prefixes
+    r = re.compile(r"pelican[-_]")
+    version = r.sub("", version)
+    return version
 
 
 def retry_on_exception(exception, retries: int = 3):
     """
-    Retry the function if the exception is raised
+    Retry the function if the exception is raised. If the exception is a 403, wait until the rate limit is reset.
     :param exception: Exception to retry on
     :param retries: Number of retries
     :return: Decorator function
@@ -219,23 +220,35 @@ def retry_on_exception(exception, retries: int = 3):
     def decorator(func):
         @functools.wraps(func)
         async def wrapper(*args, **kwargs):
-            for i in range(retries):
+
+            i = 0
+            while i < retries:
                 try:
                     return await func(*args, **kwargs)
+
+                except ClientResponseError as e:
+                    if e.status == 403:
+                        reset_time = e.headers.get("X-Ratelimit-Reset")
+                        if reset_time:
+                            wait_time = int(reset_time) - int(time.time())
+                            if wait_time > 0:
+                                logging.info(f"Rate limit exceeded. Waiting until {datetime.fromtimestamp(int(reset_time))} UTC")
+                                await asyncio.sleep(wait_time)
+                                continue
+
                 except exception as e:
                     logging.error(f"Caught exception: {e}")
                     if i == retries - 1:
                         raise e
-
-                    # Sleep for before trying again
                     await asyncio.sleep(10**(i+1))
+                    i += 1
 
         return wrapper
 
     return decorator
 
 
-@retry_on_exception(ClientResponseError, retries=4)
+@retry_on_exception(Exception, retries=4)
 async def update(repo: str, directory: str) -> None:
 
     connector = aiohttp.TCPConnector(limit=20)

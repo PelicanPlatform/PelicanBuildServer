@@ -33,7 +33,7 @@ copied and updated to match the version-less names of the files.
 /X - Directory for latest major release
 /latest - Directory for latest release
 
-## Build and Run
+## Build, Run, Release
 
 ```shell
 docker build --platform linux/amd64 -t hub.opensciencegrid.org/opensciencegrid/release-webhook .

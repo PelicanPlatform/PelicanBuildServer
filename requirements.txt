@@ -23,3 +23,4 @@ uvicorn==0.31.1
 yarl==1.14.0
 APScheduler~=3.10.4
 packaging~=24.1
+certifi
