@@ -24,6 +24,56 @@ logger = logging.getLogger(__name__)
 ssl_context = ssl.create_default_context(cafile=certifi.where())
 
 
+def retry_on_ratelimit(func):
+    """
+    Retry the function if a 403 is raised due to rate limiting
+    :return: Decorator function
+    """
+    @functools.wraps(func)
+    async def wrapper(*args, **kwargs):
+        while True:
+            try:
+                return await func(*args, **kwargs)
+            except ClientResponseError as e:
+                if e.status == 403:
+                    reset_time = e.headers.get("X-Ratelimit-Reset")
+                    if reset_time:
+                        wait_time = int(reset_time) - int(time.time())
+                        if wait_time > 0:
+                            logging.info(f"Rate limit exceeded. Waiting until {datetime.fromtimestamp(int(reset_time))} UTC")
+                            await asyncio.sleep(wait_time)
+
+    return wrapper
+
+
+def retry_on_exception(exception, retries: int = 3):
+    """
+    Retry the function if the exception is raised. If the exception is a 403, wait until the rate limit is reset.
+    :param exception: Exception to retry on
+    :param retries: Number of retries
+    :return: Decorator function
+    """
+    def decorator(func):
+        @functools.wraps(func)
+        async def wrapper(*args, **kwargs):
+
+            i = 0
+            while i < retries:
+                try:
+                    return await func(*args, **kwargs)
+
+                except exception as e:
+                    logging.error(f"Caught exception: {e}")
+                    if i == retries - 1:
+                        raise e
+                    await asyncio.sleep(10**(i+1))
+                    i += 1
+
+        return wrapper
+
+    return decorator
+
+
 def create_file_directories(file_path: str) -> None:
     """
     Create the directories for the filepath
@@ -36,7 +86,8 @@ def create_file_directories(file_path: str) -> None:
         logger.info(f"Created directory: {directory}")
 
 
-async def install_file(session: aiohttp.ClientSession, url: str, directory: str, skip_existing: bool = True) -> None:
+@retry_on_exception(Exception, retries=3)
+async def install_file(session: aiohttp.ClientSession, url: str, directory: str, skip_existing: bool = False) -> None:
     """
     Install file at url to the current directory
     :param session: aiohttp session
@@ -51,6 +102,10 @@ async def install_file(session: aiohttp.ClientSession, url: str, directory: str,
     if os.path.exists(filepath) and skip_existing:
         logger.debug(f"Skipping download of existing file: {filepath}")
         return
+
+    if os.path.exists(filepath) and not skip_existing:
+        logger.info(f"Removing and replacing existing file: {filepath}")
+        os.remove(filepath)
 
     async with session.get(url) as response:
         file_name = url.split('/')[-1]
@@ -67,6 +122,7 @@ async def install_file(session: aiohttp.ClientSession, url: str, directory: str,
         logger.info(f"Downloaded file: {filepath}")
 
 
+@retry_on_ratelimit
 async def install_assets(session: aiohttp.ClientSession, url: str, directory: str) -> None:
     """
     Install assets from the url to the directory
@@ -84,6 +140,7 @@ async def install_assets(session: aiohttp.ClientSession, url: str, directory: st
         await asyncio.gather(*tasks)
 
 
+@retry_on_ratelimit
 async def install_releases(session: aiohttp.ClientSession, repo: str, directory: str) -> None:
     """
     Iterate through the release api and if the assets don't exist in the directory, download them
@@ -100,6 +157,12 @@ async def install_releases(session: aiohttp.ClientSession, repo: str, directory:
         for release in releases:
             tag = release['tag_name'].replace("v", "")
             asset_directory = f"{directory}/{tag}"
+
+            # Skip the release if the directory already exists
+            if os.path.exists(asset_directory):
+                logger.info(f"Skipping download of existing release: {tag}")
+                continue
+
             tasks.append(install_assets(session, release['assets_url'], asset_directory))
 
         if len(tasks) == 0:
@@ -122,6 +185,7 @@ async def dynamic_linking(session: aiohttp.ClientSession, repo: str, directory: 
     await create_tracking_directories(release_tags, directory)
 
 
+@retry_on_ratelimit
 async def get_release_tags(session: aiohttp.ClientSession, repo: str) -> list[packaging.version.Version]:
 
     async with session.get(f"https://api.github.com/repos/{repo}/releases") as response:
@@ -238,7 +302,7 @@ def atomic_dir_replace(replacement_directory: str, target_directory: str) -> Non
 
     else:
         # If the target directory doesn't exist, create the symlink
-        os.symlink(replacement_directory, target_directory)
+        os.symlink(replacement_directory, target_directory, target_is_directory=True)
 
 
 def strip_version(version: str) -> str:
@@ -249,44 +313,6 @@ def strip_version(version: str) -> str:
     r = re.compile(r"pelican[-_]")
     version = r.sub("", version)
     return version
-
-
-def retry_on_exception(exception, retries: int = 3):
-    """
-    Retry the function if the exception is raised. If the exception is a 403, wait until the rate limit is reset.
-    :param exception: Exception to retry on
-    :param retries: Number of retries
-    :return: Decorator function
-    """
-    def decorator(func):
-        @functools.wraps(func)
-        async def wrapper(*args, **kwargs):
-
-            i = 0
-            while i < retries:
-                try:
-                    return await func(*args, **kwargs)
-
-                except ClientResponseError as e:
-                    if e.status == 403:
-                        reset_time = e.headers.get("X-Ratelimit-Reset")
-                        if reset_time:
-                            wait_time = int(reset_time) - int(time.time())
-                            if wait_time > 0:
-                                logging.info(f"Rate limit exceeded. Waiting until {datetime.fromtimestamp(int(reset_time))} UTC")
-                                await asyncio.sleep(wait_time)
-                                continue
-
-                except exception as e:
-                    logging.error(f"Caught exception: {e}")
-                    if i == retries - 1:
-                        raise e
-                    await asyncio.sleep(10**(i+1))
-                    i += 1
-
-        return wrapper
-
-    return decorator
 
 
 async def patch_metadata(patch: dict, directory: str) -> None:
@@ -316,7 +342,7 @@ async def patch_metadata(patch: dict, directory: str) -> None:
         await f.write(json.dumps(metadata, indent=4))
 
 
-@retry_on_exception(Exception, retries=4)
+@retry_on_exception(Exception, retries=3)
 async def update(repo: str, directory: str) -> None:
 
     connector = aiohttp.TCPConnector(limit=60)
