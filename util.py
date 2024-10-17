@@ -241,7 +241,7 @@ def create_tracking_directory(release_tag: packaging.version.Version, tracking_d
     """
 
     # Create a directory for the update
-    build_directory = f"/app/{uuid.uuid4()}"
+    build_directory = f"/srv/{uuid.uuid4()}"
     os.makedirs(build_directory)
 
     # For each file in the existing tag directory create a symlink in the build directory
@@ -293,7 +293,8 @@ def atomic_dir_replace(replacement_directory: str, target_directory: str) -> Non
         target_destination_directory = os.readlink(target_directory)
 
         # Atomically swap the directories
-        tmp_link = f"/tmp/{uuid.uuid4()}"
+        tmp_link = f"/srv/tmp/{uuid.uuid4()}"
+        create_file_directories(tmp_link)
         os.symlink(replacement_directory, tmp_link)
         os.replace(tmp_link, target_directory)
 
