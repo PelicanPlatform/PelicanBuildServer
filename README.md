@@ -35,12 +35,20 @@ copied and updated to match the version-less names of the files.
 
 ## Build, Run, Release
 
+### Build
+
 ```shell
-docker build --platform linux/amd64 -t hub.opensciencegrid.org/opensciencegrid/release-webhook .
+docker build -t release-webhook .
 ```
 
 ```shell
-docker run -it -p 8080:8000 --env-file example.env -v ${PWD}/releases:/srv/releases hub.opensciencegrid.org/opensciencegrid/release-webhook
+docker run -it -p 8080:8000 --env-file example.env -v ${PWD}/releases:/srv/releases release-webhook
+```
+
+### Release
+
+```shell
+docker build --platform linux/amd64 -t hub.opensciencegrid.org/opensciencegrid/release-webhook .
 ```
 
 ```shell

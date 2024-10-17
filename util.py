@@ -1,6 +1,8 @@
 import functools
 import ssl
+import json
 import time
+import uuid
 from datetime import datetime
 import certifi
 import os
@@ -158,25 +160,27 @@ async def create_tracking_directories(release_tags: list[packaging.version.Versi
     for tag_root, tag in tag_mapping.items():
         create_tracking_directory(tag, tag_root, directory)
 
+    # Patch the tracking directory metadata
+    patch = {
+        "tracking_directories": {k: v.base_version for k, v in tag_mapping.items()}
+    }
+    await patch_metadata(patch, directory)
+
 
 def create_tracking_directory(release_tag: packaging.version.Version, tracking_directory_name: str, directory: str) -> None:
     """
-    Create a tracking directory. This links to an existing semver tag and updates the latest directory. Files are updated
-    to not include the version number and the checksum file is updated to reflect the new filenames.
+    Creates a tracking directory for the release tag and atomically swaps it with the existing tracking directory
     :param release_tag: The release tag to link to
     :param tracking_directory_name: The name of the tracking directory ( latest, X, X.Y )
     :param directory: The directory the releases are stored in
     :return:
     """
 
-    # Create a fresh latest directory
-    tracking_directory = f"{directory}/{tracking_directory_name}"
-    if os.path.exists(tracking_directory):
-        shutil.rmtree(tracking_directory)
-    os.makedirs(tracking_directory)
-    logging.info(f"Created latest directory: {tracking_directory}")
+    # Create a directory for the update
+    build_directory = f"/app/{uuid.uuid4()}"
+    os.makedirs(build_directory)
 
-    # For each file in the tag directory create a symlink in the latest directory
+    # For each file in the existing tag directory create a symlink in the build directory
     tag_directory = f"{directory}/{release_tag}"
     for file in os.listdir(tag_directory):
 
@@ -185,19 +189,56 @@ def create_tracking_directory(release_tag: packaging.version.Version, tracking_d
             continue
 
         relative_tag_file = f"../{release_tag.base_version}/{file}"
-        latest_file = f"{tracking_directory}/{strip_version(file)}"
+        latest_file = f"{build_directory}/{strip_version(file)}"
         os.symlink(relative_tag_file, latest_file)
         logging.info(f"Created symbolic link: {latest_file} -> {relative_tag_file}")
 
     # Copy and update the checksum file
     checksum_file = f"{tag_directory}/checksums.txt"
-    latest_checksum_file = f"{tracking_directory}/checksums.txt"
+    latest_checksum_file = f"{build_directory}/checksums.txt"
     with open(checksum_file, "r") as f_existing:
         with open(latest_checksum_file, "w") as f_latest:
             for line in f_existing:
                 checksum, file = line.split()
                 latest_file = strip_version(file)
                 f_latest.write(f"{checksum} {latest_file}\n")
+
+    # Print the version to a version.txt file for reference
+    with open(f"{build_directory}/version.txt", "w") as f:
+        f.write(release_tag.base_version)
+
+    # Replace and delete the existing tracking directory
+    tracking_directory = f"{directory}/{tracking_directory_name}"
+    atomic_dir_replace(build_directory, tracking_directory)
+
+
+def atomic_dir_replace(replacement_directory: str, target_directory: str) -> None:
+    """
+    Atomically replace a directory with another directory, removing the existing directory
+    :param replacement_directory: Directory to swap into the target directory
+    :param target_directory: Final destination for the replacement directory, must be non-existent or a symlink
+    """
+
+    if os.path.exists(target_directory):
+
+        # Check that the target directory is a symlink
+        if not os.path.islink(target_directory):
+            raise ValueError(f"Target directory {target_directory} must be a symlink")
+
+        # Save the existing directory location
+        target_destination_directory = os.readlink(target_directory)
+
+        # Atomically swap the directories
+        tmp_link = f"/tmp/{uuid.uuid4()}"
+        os.symlink(replacement_directory, tmp_link)
+        os.replace(tmp_link, target_directory)
+
+        # Remove the existing directory
+        shutil.rmtree(target_destination_directory)
+
+    else:
+        # If the target directory doesn't exist, create the symlink
+        os.symlink(replacement_directory, target_directory)
 
 
 def strip_version(version: str) -> str:
@@ -248,13 +289,46 @@ def retry_on_exception(exception, retries: int = 3):
     return decorator
 
 
+async def patch_metadata(patch: dict, directory: str) -> None:
+    """
+    Patch the metadata of the file server
+    :param patch: Directory to merge the existing metadata with
+    :param directory: Directory the files are stored in
+    """
+
+    metadata = {}
+    metadata_file = f"{directory}/meta/metadata.json"
+
+    # Create the metadata file if it doesn't exist
+    if not os.path.exists(metadata_file):
+        create_file_directories(metadata_file)
+        async with aiof.open(metadata_file, "w") as f:
+            await f.write("{}")
+
+    # Open the metadata file if it does
+    else:
+        async with aiof.open(metadata_file, "r") as f:
+            metadata = json.loads(await f.read())
+
+    # Merge the patch and write the metadata file
+    metadata.update(patch)
+    async with aiof.open(metadata_file, "w") as f:
+        await f.write(json.dumps(metadata, indent=4))
+
+
 @retry_on_exception(Exception, retries=4)
 async def update(repo: str, directory: str) -> None:
 
-    connector = aiohttp.TCPConnector(limit=20)
+    connector = aiohttp.TCPConnector(limit=60)
     async with aiohttp.ClientSession(connector=connector, raise_for_status=True) as session:
         await install_releases(session, repo, directory)
         await dynamic_linking(session, repo, directory)
+
+    # Patch the metadata
+    patch = {
+        "last_updated": datetime.utcnow().isoformat()
+    }
+    await patch_metadata(patch, directory)
 
 
 async def main():
