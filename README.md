@@ -29,9 +29,9 @@ Directories to track the lifecycle of a release, always pointing to the latest a
 directories are symlinked and renamed to omit the release tag. The only file not symlinked is `checksums.txt` which is 
 copied and updated to match the version-less names of the files.
 
-/X.Y - Directory for latest minor release
-/X - Directory for latest major release
-/latest - Directory for latest release
+- /X.Y - Directory for latest minor release
+- /X - Directory for latest major release
+- /latest - Directory for latest release
 
 ## Build, Run, Release
 
