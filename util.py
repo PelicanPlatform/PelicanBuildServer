@@ -74,6 +74,23 @@ def retry_on_exception(exception, retries: int = 3):
     return decorator
 
 
+async def get_all_github(session: aiohttp.ClientSession, url: str) -> list:
+    """Paginate through all pages of a Github API endpoint returning total list"""
+
+    url = f"{url}?per_page=100"
+
+    data = []
+
+    with session.get(url) as response:
+        data.extend(await response.json())
+
+        while 'next' in response.links:
+            url = response.links['next']['url']
+            async with session.get(url) as response:
+                data.extend(await response.json())
+
+    return data
+
 def create_file_directories(file_path: str) -> None:
     """
     Create the directories for the filepath
@@ -150,26 +167,25 @@ async def install_releases(session: aiohttp.ClientSession, repo: str, directory:
     :return:
     """
 
-    async with session.get(f"https://api.github.com/repos/{repo}/releases") as response:
-        releases = await response.json()
+    releases = await get_all_github(session, f"https://api.github.com/repos/{repo}/releases")
 
-        tasks = []
-        for release in releases:
-            tag = release['tag_name'].replace("v", "")
-            asset_directory = f"{directory}/{tag}"
+    tasks = []
+    for release in releases:
+        tag = release['tag_name'].replace("v", "")
+        asset_directory = f"{directory}/{tag}"
 
-            # Skip the release if the directory already exists
-            if os.path.exists(asset_directory):
-                logger.info(f"Skipping download of existing release: {tag}")
-                continue
+        # Skip the release if the directory already exists
+        if os.path.exists(asset_directory):
+            logger.info(f"Skipping download of existing release: {tag}")
+            continue
 
-            tasks.append(install_assets(session, release['assets_url'], asset_directory))
+        tasks.append(install_assets(session, release['assets_url'], asset_directory))
 
-        if len(tasks) == 0:
-            logger.info("No new releases found.")
-            return
+    if len(tasks) == 0:
+        logger.info("No new releases found.")
+        return
 
-        await asyncio.gather(*tasks)
+    await asyncio.gather(*tasks)
 
 
 async def dynamic_linking(session: aiohttp.ClientSession, repo: str, directory: str) -> None:
@@ -187,16 +203,15 @@ async def dynamic_linking(session: aiohttp.ClientSession, repo: str, directory: 
 
 @retry_on_ratelimit
 async def get_release_tags(session: aiohttp.ClientSession, repo: str) -> list[packaging.version.Version]:
+    """Get all release tags from the repository"""
 
-    async with session.get(f"https://api.github.com/repos/{repo}/releases") as response:
+    releases = await get_all_github(session, f"https://api.github.com/repos/{repo}/releases")
+    release_tags = [packaging.version.parse(release['tag_name'].replace("v", "")) for release in releases]
 
-        releases = await response.json()
-        release_tags = [packaging.version.parse(release['tag_name'].replace("v", "")) for release in releases]
+    # Sort the release tags
+    release_tags.sort(reverse=True)
 
-        # Sort the release tags
-        release_tags.sort(reverse=True)
-
-        return release_tags
+    return release_tags
 
 
 async def create_tracking_directories(release_tags: list[packaging.version.Version], directory: str) -> None:
@@ -252,7 +267,7 @@ def create_tracking_directory(release_tag: packaging.version.Version, tracking_d
         if file == "checksums.txt":
             continue
 
-        relative_tag_file = f"../{release_tag.base_version}/{file}"
+        relative_tag_file = f"../releases/{release_tag.base_version}/{file}"
         latest_file = f"{build_directory}/{strip_version(file)}"
         os.symlink(relative_tag_file, latest_file)
         logging.info(f"Created symbolic link: {latest_file} -> {relative_tag_file}")
@@ -309,9 +324,6 @@ def atomic_dir_replace(replacement_directory: str, target_directory: str) -> Non
 def strip_version(version: str) -> str:
     # Remove the version number from the file
     r = re.compile(r"[-_]\d+\.\d+\.\d+[-_r]+\d*")
-    version = r.sub("", version)
-    # Remove unnecessary pelican prefixes
-    r = re.compile(r"pelican[-_]")
     version = r.sub("", version)
     return version
 
