@@ -2,6 +2,7 @@ import functools
 import ssl
 import json
 import time
+import hashlib
 import uuid
 from datetime import datetime
 import certifi
@@ -81,7 +82,7 @@ async def get_all_github(session: aiohttp.ClientSession, url: str) -> list:
 
     data = []
 
-    with session.get(url) as response:
+    async with session.get(url) as response:
         data.extend(await response.json())
 
         while 'next' in response.links:
@@ -90,6 +91,7 @@ async def get_all_github(session: aiohttp.ClientSession, url: str) -> list:
                 data.extend(await response.json())
 
     return data
+
 
 def create_file_directories(file_path: str) -> None:
     """
@@ -101,6 +103,65 @@ def create_file_directories(file_path: str) -> None:
     if not os.path.exists(directory):
         os.makedirs(directory)
         logger.info(f"Created directory: {directory}")
+
+
+def verify_release_download(directory: str):
+    """Iterate checksum.txt and verify the checksums of the downloaded files"""
+
+    checksum_file = f"{directory}/checksums.txt"
+
+    # Check if the checksum file exists
+    if not os.path.exists(checksum_file):
+        raise FileNotFoundError(f"Checksum file not found: {checksum_file}")
+
+    with open(checksum_file, "r") as f:
+        for line in f:
+            checksum, file = line.split()
+            file_path = f"{directory}/{file}"
+            if not os.path.exists(file_path):
+                raise FileNotFoundError(f"File not found: {file_path}")
+            with open(file_path, "rb") as f:
+                file_checksum = hashlib.sha256(f.read()).hexdigest()
+            if file_checksum != checksum:
+                raise ValueError(f"Checksum mismatch: {file_path}")
+
+    logger.info(f"Verified release download: {directory}")
+
+
+async def verify_all_release_checksums(directory: str) -> None:
+    """
+    Verify the checksums of all the releases in the directory
+    :param directory: Directory to verify the checksums of
+    :return:
+    """
+
+    try:
+        for release in os.listdir(directory):
+
+            # Skip the meta directory
+            if release == "meta":
+                continue
+
+            release_directory = f"{directory}/{release}"
+            verify_release_download(release_directory)
+
+        # Update the metadata to reflect the last verification
+        patch = {
+            "verified": "True",
+            "last_verification_check": datetime.utcnow().isoformat()
+        }
+        await patch_metadata(patch, directory)
+
+    except Exception as e:
+        logger.error(f"Error verifying release checksums: {e}")
+
+        # Update the metadata to reflect the last verification
+        patch = {
+            "verified": "False",
+            "last_verification_error": str(e),
+            "last_verification_check": datetime.utcnow().isoformat()
+        }
+        await patch_metadata(patch, directory)
 
 
 @retry_on_exception(Exception, retries=3)
@@ -139,6 +200,8 @@ async def install_file(session: aiohttp.ClientSession, url: str, directory: str,
         logger.info(f"Downloaded file: {filepath}")
 
 
+@retry_on_exception(ValueError, retries=2)
+@retry_on_exception(FileNotFoundError, retries=2)
 @retry_on_ratelimit
 async def install_assets(session: aiohttp.ClientSession, url: str, directory: str) -> None:
     """
@@ -149,13 +212,14 @@ async def install_assets(session: aiohttp.ClientSession, url: str, directory: st
     :return:
     """
 
-    async with session.get(url) as response:
-        assets = await response.json()
-        asset_urls = [asset['browser_download_url'] for asset in assets]
-        tasks = [install_file(session, asset_url, directory) for asset_url in asset_urls]
-        logger.info(f"Installing assets from: {url}")
-        await asyncio.gather(*tasks)
+    assets = await get_all_github(session, url)
+    asset_urls = [asset['browser_download_url'] for asset in assets]
+    tasks = [install_file(session, asset_url, directory) for asset_url in asset_urls]
+    logger.info(f"Installing assets from: {url}")
+    await asyncio.gather(*tasks)
 
+    # Verify the download
+    verify_release_download(directory)
 
 @retry_on_ratelimit
 async def install_releases(session: aiohttp.ClientSession, repo: str, directory: str) -> None:
@@ -256,7 +320,7 @@ def create_tracking_directory(release_tag: packaging.version.Version, tracking_d
     """
 
     # Create a directory for the update
-    build_directory = f"/srv/{uuid.uuid4()}"
+    build_directory = f"/srv/{release_tag.base_version}-{uuid.uuid4()}"
     os.makedirs(build_directory)
 
     # For each file in the existing tag directory create a symlink in the build directory
@@ -358,8 +422,20 @@ async def patch_metadata(patch: dict, directory: str) -> None:
 @retry_on_exception(Exception, retries=3)
 async def update(repo: str, directory: str) -> None:
 
-    connector = aiohttp.TCPConnector(limit=60)
-    async with aiohttp.ClientSession(connector=connector, raise_for_status=True) as session:
+    # Check if there is a token to use for rate limiting leniency
+    headers = {}
+    if 'GITHUB_TOKEN' in os.environ:
+        logger.info("Using GITHUB_TOKEN for rate limiting leniency")
+        headers = {
+            "Authorization": f"Bearer {os.getenv('GITHUB_TOKEN')}"
+        }
+
+    connector = aiohttp.TCPConnector(limit=60, ssl=ssl.create_default_context(cafile=certifi.where()))
+    async with aiohttp.ClientSession(
+        connector=connector,
+        raise_for_status=True,
+        headers=headers,
+    ) as session:
         await install_releases(session, repo, directory)
         await dynamic_linking(session, repo, directory)
 
