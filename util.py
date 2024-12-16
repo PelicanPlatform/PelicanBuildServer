@@ -286,6 +286,9 @@ async def create_tracking_directories(release_tags: list[packaging.version.Versi
     :return:
     """
 
+    # Filter out the prerelease tags
+    release_tags = [tag for tag in release_tags if not tag.is_prerelease]
+
     # Iterate the tags into a mapping dictionary
     tag_mapping = {
         'latest': release_tags[0]
