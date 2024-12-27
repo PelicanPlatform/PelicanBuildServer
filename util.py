@@ -18,7 +18,7 @@ import asyncio
 from aiohttp import ClientResponseError
 
 # Configure logging
-logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 # Create default ssl context for dev
@@ -153,7 +153,7 @@ async def verify_all_release_checksums(directory: str) -> None:
         except Exception as e:
             error = f"Error verifying release checksums for {release_directory}: {e}"
             logger.error(error)
-            patch['last_verification_error'] = patch['last_verification_error'].append(str(e))
+            patch['last_verification_error'] = patch['last_verification_error'] + [error]
 
     # Update the metadata to reflect the last verification
     await patch_metadata(patch, directory)
@@ -229,7 +229,7 @@ async def install_releases(session: aiohttp.ClientSession, repo: str, directory:
 
     releases = await get_all_github(session, f"https://api.github.com/repos/{repo}/releases")
 
-    for release in releases:
+    for release in releases[:2]:
         tag = release['tag_name'].replace("v", "")
         asset_directory = f"{directory}/{tag}"
 
@@ -264,7 +264,7 @@ async def get_release_tags(session: aiohttp.ClientSession, repo: str) -> list[pa
     # Sort the release tags
     release_tags.sort(reverse=True)
 
-    return release_tags
+    return release_tags[:2]
 
 
 async def create_tracking_directories(release_tags: list[packaging.version.Version], directory: str) -> None:
