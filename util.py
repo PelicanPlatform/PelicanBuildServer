@@ -18,7 +18,7 @@ import asyncio
 from aiohttp import ClientResponseError
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 # Create default ssl context for dev
@@ -135,33 +135,28 @@ async def verify_all_release_checksums(directory: str) -> None:
     :return:
     """
 
-    try:
-        for release in os.listdir(directory):
+    patch = {
+        "verified": "True",
+        "last_verification_check": datetime.utcnow().isoformat(),
+        'last_verification_error': []
+    }
+    for release in os.listdir(directory):
 
-            # Skip the meta directory
-            if release == "meta":
-                continue
+        # Skip the meta directory
+        if release == "meta":
+            continue
 
-            release_directory = f"{directory}/{release}"
+        release_directory = f"{directory}/{release}"
+
+        try:
             verify_release_download(release_directory)
+        except Exception as e:
+            error = f"Error verifying release checksums for {release_directory}: {e}"
+            logger.error(error)
+            patch['last_verification_error'] = patch['last_verification_error'].append(str(e))
 
-        # Update the metadata to reflect the last verification
-        patch = {
-            "verified": "True",
-            "last_verification_check": datetime.utcnow().isoformat()
-        }
-        await patch_metadata(patch, directory)
-
-    except Exception as e:
-        logger.error(f"Error verifying release checksums: {e}")
-
-        # Update the metadata to reflect the last verification
-        patch = {
-            "verified": "False",
-            "last_verification_error": str(e),
-            "last_verification_check": datetime.utcnow().isoformat()
-        }
-        await patch_metadata(patch, directory)
+    # Update the metadata to reflect the last verification
+    await patch_metadata(patch, directory)
 
 
 @retry_on_exception(Exception, retries=3)
@@ -189,7 +184,7 @@ async def install_file(session: aiohttp.ClientSession, url: str, directory: str,
         file_name = url.split('/')[-1]
         filepath = f"{directory}/{file_name}"
         create_file_directories(filepath)
-        logger.info(f"Downloading file: {url} to {filepath}")
+        logger.debug(f"Downloading file: {url} to {filepath}")
 
         async with aiof.open(filepath, "wb") as f:
             while True:
@@ -197,7 +192,7 @@ async def install_file(session: aiohttp.ClientSession, url: str, directory: str,
                 if not chunk:
                     break
                 await f.write(chunk)
-        logger.info(f"Downloaded file: {filepath}")
+        logger.debug(f"Downloaded file: {filepath}")
 
 
 @retry_on_exception(ValueError, retries=2)
@@ -217,6 +212,7 @@ async def install_assets(session: aiohttp.ClientSession, url: str, directory: st
     tasks = [install_file(session, asset_url, directory) for asset_url in asset_urls]
     logger.info(f"Installing assets from: {url}")
     await asyncio.gather(*tasks)
+    logger.info(f"Installed assets from: {url}")
 
     # Verify the download
     verify_release_download(directory)
@@ -233,7 +229,6 @@ async def install_releases(session: aiohttp.ClientSession, repo: str, directory:
 
     releases = await get_all_github(session, f"https://api.github.com/repos/{repo}/releases")
 
-    tasks = []
     for release in releases:
         tag = release['tag_name'].replace("v", "")
         asset_directory = f"{directory}/{tag}"
@@ -243,13 +238,7 @@ async def install_releases(session: aiohttp.ClientSession, repo: str, directory:
             logger.info(f"Skipping download of existing release: {tag}")
             continue
 
-        tasks.append(install_assets(session, release['assets_url'], asset_directory))
-
-    if len(tasks) == 0:
-        logger.info("No new releases found.")
-        return
-
-    await asyncio.gather(*tasks)
+        await install_assets(session, release['assets_url'], asset_directory)
 
 
 async def dynamic_linking(session: aiohttp.ClientSession, repo: str, directory: str) -> None:
@@ -441,6 +430,7 @@ async def update(repo: str, directory: str) -> None:
     ) as session:
         await install_releases(session, repo, directory)
         await dynamic_linking(session, repo, directory)
+        await verify_all_release_checksums(directory)
 
     # Patch the metadata
     patch = {

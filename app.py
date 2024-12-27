@@ -20,6 +20,10 @@ async def update():
     await util.update(settings.GITHUB_REPO, settings.DOWNLOAD_DIRECTORY)
 
 
+async def verify():
+    await util.verify_all_release_checksums(settings.DOWNLOAD_DIRECTORY)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
 
@@ -51,6 +55,17 @@ async def release_download_toggle():
 
     try:
         await update()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return {"message": "success"}
+
+
+@app.post('/api/verify_releases')
+async def verify_releases():
+
+    try:
+        await util.verify_all_release_checksums(settings.DOWNLOAD_DIRECTORY)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
