@@ -112,7 +112,8 @@ def verify_release_download(directory: str):
 
     # Check if the checksum file exists
     if not os.path.exists(checksum_file):
-        raise FileNotFoundError(f"Checksum file not found: {checksum_file}")
+        logger.info(f"Checksum file not found: {checksum_file}")
+        return
 
     with open(checksum_file, "r") as f:
         for line in f:
@@ -138,7 +139,7 @@ async def verify_all_release_checksums(directory: str) -> None:
     patch = {
         "verified": "True",
         "last_verification_check": datetime.utcnow().isoformat(),
-        'last_verification_error': []
+        'verification_error': []
     }
     for release in os.listdir(directory):
 
@@ -150,10 +151,11 @@ async def verify_all_release_checksums(directory: str) -> None:
 
         try:
             verify_release_download(release_directory)
+            patch['verification_error'] = []
         except Exception as e:
             error = f"Error verifying release checksums for {release_directory}: {e}"
             logger.error(error)
-            patch['last_verification_error'] = patch['last_verification_error'] + [error]
+            patch['verification_error'] = patch['verification_error'] + [error]
 
     # Update the metadata to reflect the last verification
     await patch_metadata(patch, directory)
@@ -229,7 +231,7 @@ async def install_releases(session: aiohttp.ClientSession, repo: str, directory:
 
     releases = await get_all_github(session, f"https://api.github.com/repos/{repo}/releases")
 
-    for release in releases[:2]:
+    for release in releases:
         tag = release['tag_name'].replace("v", "")
         asset_directory = f"{directory}/{tag}"
 
@@ -264,7 +266,7 @@ async def get_release_tags(session: aiohttp.ClientSession, repo: str) -> list[pa
     # Sort the release tags
     release_tags.sort(reverse=True)
 
-    return release_tags[:2]
+    return release_tags
 
 
 async def create_tracking_directories(release_tags: list[packaging.version.Version], directory: str) -> None:
@@ -328,15 +330,16 @@ def create_tracking_directory(release_tag: packaging.version.Version, tracking_d
         os.symlink(relative_tag_file, latest_file)
         logging.info(f"Created symbolic link: {latest_file} -> {relative_tag_file}")
 
-    # Copy and update the checksum file
+    # Copy and update the checksum file if it exists
     checksum_file = f"{tag_directory}/checksums.txt"
-    latest_checksum_file = f"{build_directory}/checksums.txt"
-    with open(checksum_file, "r") as f_existing:
-        with open(latest_checksum_file, "w") as f_latest:
-            for line in f_existing:
-                checksum, file = line.split()
-                latest_file = strip_version(file)
-                f_latest.write(f"{checksum} {latest_file}\n")
+    if not os.path.exists(checksum_file):
+        latest_checksum_file = f"{build_directory}/checksums.txt"
+        with open(checksum_file, "r") as f_existing:
+            with open(latest_checksum_file, "w") as f_latest:
+                for line in f_existing:
+                    checksum, file = line.split()
+                    latest_file = strip_version(file)
+                    f_latest.write(f"{checksum} {latest_file}\n")
 
     # Print the version to a version.txt file for reference
     with open(f"{build_directory}/version.txt", "w") as f:

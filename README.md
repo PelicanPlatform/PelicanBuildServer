@@ -53,11 +53,11 @@ docker run -it -p 8080:8000 --env-file example.env -v ${PWD}/releases:/srv/relea
 ### Release
 
 ```shell
-docker build --platform linux/amd64 -t hub.opensciencegrid.org/opensciencegrid/release-webhook:latest .
+docker build --platform linux/amd64 -t hub.opensciencegrid.org/opensciencegrid/release-webhook:20241227 .
 ```
 
 ```shell
-docker push hub.opensciencegrid.org/opensciencegrid/release-webhook:latest
+docker push hub.opensciencegrid.org/opensciencegrid/release-webhook:20241227
 ```
 
 ## Run the NGINX server that sits in front of the webhook
