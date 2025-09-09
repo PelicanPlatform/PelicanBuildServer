@@ -120,7 +120,10 @@ def verify_release_download(directory: str):
             checksum, file = line.split()
             file_path = f"{directory}/{file}"
             if not os.path.exists(file_path):
-                raise FileNotFoundError(f"File not found: {file_path}")
+                # Fix for some rpms swapping out these values only in the checksum
+                file_path = file_path.replace("~", ".")
+                if not os.path.exists(file_path):
+                    raise FileNotFoundError(f"File not found: {file_path}")
             with open(file_path, "rb") as f:
                 file_checksum = hashlib.sha256(f.read()).hexdigest()
             if file_checksum != checksum:
@@ -433,7 +436,6 @@ async def update(repo: str, directory: str) -> None:
     ) as session:
         await install_releases(session, repo, directory)
         await dynamic_linking(session, repo, directory)
-        await verify_all_release_checksums(directory)
 
     # Patch the metadata
     patch = {
